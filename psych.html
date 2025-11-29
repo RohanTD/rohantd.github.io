@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sensation -> Attention -> Perception Model</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h1 { color: #333; }
+        .controls { margin-bottom: 20px; background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); text-align: center; }
+        button { background: #4285F4; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; margin: 5px; }
+        button:hover { background: #357ae8; }
+        button.reset { background: #ea4335; }
+        button.reset:hover { background: #d93025; }
+        #canvas-container { position: relative; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-radius: 4px; overflow: hidden; }
+        canvas { background: #fff; border: 1px solid #ccc; display: block; }
+        .labels { display: flex; justify-content: space-between; width: 600px; margin-top: 10px; color: #555; font-weight: bold; }
+        .explanation { max-width: 600px; margin-top: 20px; background: white; padding: 20px; border-radius: 8px; line-height: 1.6; }
+    </style>
+</head>
+<body>
+
+    <h1>Build-A-Brain Information Processing Pipeline</h1>
+    
+    <div class="controls">
+        <button onclick="startSimulation()">Start Simulation</button>
+        <button class="reset" onclick="resetSimulation()">Reset</button>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="simCanvas" width="600" height="720"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Simulation State
+        let particles = [];
+        let simulationRunning = true;
+        let filterActive = true;
+        
+        // Physics constants (slower, gentler motion)
+        const GRAVITY = 0.04; // much smaller gravity for slow fall
+        const FRICTION = 0.86; // higher damping
+        const BOUNCE = -0.15;
+        
+        // Adjusted positions for empty space above funnel
+        const FUNNEL_TOP_Y = 150;
+        const FUNNEL_BOTTOM_Y = 380;
+        const SIEVE_Y = 450;
+        
+        // Box container constants
+        const BOX_LEFT = 250;
+        const BOX_RIGHT = 350;
+        const BOX_TOP = 550;
+        const BOX_BOTTOM = 650;
+        const BOX_CENTER_X = (BOX_LEFT + BOX_RIGHT) / 2;
+        const BOX_CENTER_Y = (BOX_TOP + BOX_BOTTOM) / 2;
+        
+        // CRITICAL: Balls cannot go below this Y position
+        const BALL_RADIUS = 4;
+        const BALL_DIAMETER = BALL_RADIUS * 2;
+        const MIN_BOX_Y = BOX_BOTTOM - BALL_RADIUS; // Hard floor
+        
+        // All balls in the box container
+        let heartBalls = [];
+        
+        // Spatial Grid for collision optimization
+        const GRID_SIZE = 12; // Slightly larger than 2*radius
+        let collisionGrid = {}; 
+        
+        function getGridKey(x, y) {
+            return `${Math.floor(x / GRID_SIZE)},${Math.floor(y / GRID_SIZE)}`;
+        }
+        
+        function addToGrid(particle) {
+            const key = getGridKey(particle.x, particle.y);
+            if (!collisionGrid[key]) collisionGrid[key] = [];
+            collisionGrid[key].push(particle);
+        }
+        
+        function getNearbyParticles(particle) {
+            const x = Math.floor(particle.x / GRID_SIZE);
+            const y = Math.floor(particle.y / GRID_SIZE);
+            let nearby = [];
+            
+            for (let i = -1; i <= 1; i++) {
+                for (let j = -1; j <= 1; j++) {
+                    const key = `${x + i},${y + j}`;
+                    if (collisionGrid[key]) {
+                        for (let k = 0; k < collisionGrid[key].length; k++) {
+                            nearby.push(collisionGrid[key][k]);
+                        }
+                    }
+                }
+            }
+            return nearby;
+        }
+        
+        // Get container boundary
+        function getContainerBounds() {
+            return {
+                left: BOX_LEFT,
+                right: BOX_RIGHT,
+                top: BOX_TOP,
+                bottom: BOX_BOTTOM
+            };
+        }
+
+        class Particle {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 1.2; // gentler horizontal
+                this.vy = Math.random() * 0.6 + 0.1; // much slower initial downward speed
+                this.type = type;
+                this.radius = type === 'relevant' ? BALL_RADIUS : BALL_RADIUS * 2; 
+                this.color = type === 'relevant' ? '#4285F4' : '#EA4335';
+                this.stopped = false;
+                this.stuckOnSieve = false;
+                this.fellOff = false;
+                this.inHeart = false;
+                this.settled = false;
+                this.targetSpot = null;
+                this.inSieve = false;
+            }
+
+            update() {
+                if (this.settled || this.stopped) return;
+                if (this.fellOff && this.y > canvas.height) return;
+
+                this.vy += GRAVITY;
+                this.vx *= 0.98;
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Check if particle misses the funnel entirely
+                if (this.y >= FUNNEL_TOP_Y - 5 && this.y < FUNNEL_TOP_Y + 10 && !this.fellOff && !this.inHeart) {
+                    if (this.x < 100 - this.radius || this.x > 500 + this.radius) {
+                        this.fellOff = true;
+                        return;
+                    }
+                }
+
+                // Funnel Collision
+                if (this.y > FUNNEL_TOP_Y && this.y < FUNNEL_BOTTOM_Y && !this.fellOff) {
+                    const progress = (this.y - FUNNEL_TOP_Y) / (FUNNEL_BOTTOM_Y - FUNNEL_TOP_Y);
+                    const leftBound = 100 + progress * 150;
+                    const rightBound = 500 - progress * 150;
+                    
+                    if (this.x < leftBound + this.radius) {
+                        this.x = leftBound + this.radius;
+                        this.vx *= -0.5;
+                    }
+                    if (this.x > rightBound - this.radius) {
+                        this.x = rightBound - this.radius;
+                        this.vx *= -0.5;
+                    }
+                }
+                
+                // Channel between funnel exit - particles fall through
+                if (this.y >= FUNNEL_BOTTOM_Y && this.y < 600 && !this.fellOff && !this.stuckOnSieve) {
+                    const channelLeft = 230;
+                    const channelRight = 370;
+                    
+                    if (this.x < channelLeft + this.radius) {
+                        this.x = channelLeft + this.radius;
+                        this.vx = Math.abs(this.vx) * 0.3;
+                    }
+                    if (this.x > channelRight - this.radius) {
+                        this.x = channelRight - this.radius;
+                        this.vx = -Math.abs(this.vx) * 0.3;
+                    }
+                }
+
+                // Sieve/Filter Collision - sieve is wide (200-400)
+                if (filterActive && this.y > SIEVE_Y - this.radius && this.y < SIEVE_Y + 20 && !this.fellOff && !this.inSieve) {
+                    if (this.type === 'distractor') {
+                        this.inSieve = true;
+                        this.y = SIEVE_Y - this.radius;
+                        this.vy = 0;
+                        this.vx *= 0.7;
+                        this.stopped = true;
+                        return;
+                    }
+                }
+
+                // Floor for particles that fell off
+                if (this.fellOff && this.y > canvas.height - this.radius) {
+                    this.y = canvas.height - this.radius;
+                    this.vy = 0;
+                    this.vx = 0;
+                    this.stopped = true;
+                }
+            }
+            
+            handleBoxFill() {
+                // Only relevant particles go into the box, skip distractors in sieve
+                if (this.type !== 'relevant' || this.inSieve) {
+                    return;
+                }
+                
+                // Check if in box region
+                if (this.y < BOX_TOP) return;
+                
+                this.inHeart = true;
+                
+                // === PHYSICS SUB-STEPS for stability ===
+                const iterations = 5;
+                
+                for (let iter = 0; iter < iterations; iter++) {
+                    // BOX PHYSICS
+                    // ABSOLUTE FLOOR
+                    if (this.y > MIN_BOX_Y) {
+                        this.y = MIN_BOX_Y;
+                        this.vy = 0;
+                        this.vx *= 0.9;
+                    }
+                    
+                    // Wall Constraints - BOX BOUNDARIES
+                    // Left wall
+                    if (this.x - this.radius < BOX_LEFT) {
+                        this.x = BOX_LEFT + this.radius;
+                        this.vx = Math.abs(this.vx) * 0.2;
+                    }
+                    // Right wall
+                    if (this.x + this.radius > BOX_RIGHT) {
+                        this.x = BOX_RIGHT - this.radius;
+                        this.vx = -Math.abs(this.vx) * 0.2;
+                    }
+                    // Top wall - only bounce if ball is trying to go above the box
+                    if (this.y - this.radius < BOX_TOP && this.vy < 0) {
+                        this.y = BOX_TOP + this.radius;
+                        this.vy = Math.abs(this.vy) * 0.3; // gentler bounce
+                    }
+                    
+                    // 3. Particle Collisions - STRICT SEPARATION
+                    const neighbors = getNearbyParticles(this);
+                    for (const other of neighbors) {
+                        if (other === this) continue;
+                        
+                        const dx2 = this.x - other.x;
+                        const dy2 = this.y - other.y;
+                        const distSq = dx2 * dx2 + dy2 * dy2;
+                        const minDist = this.radius + other.radius + 0.5;
+                        
+                        if (distSq < minDist * minDist) {
+                            const dist = Math.sqrt(distSq);
+                            if (dist < 0.01) {
+                                this.x += (Math.random() - 0.5) * 2;
+                                this.y -= 1;
+                                continue;
+                            }
+                            
+                            const overlap = minDist - dist;
+                            const nx = dx2 / dist;
+                            const ny = dy2 / dist;
+                            
+                            const pushStrength = overlap * 0.6;
+                            this.x += nx * pushStrength;
+                            this.y += ny * pushStrength;
+                            other.x -= nx * pushStrength;
+                            other.y -= ny * pushStrength;
+                            
+                            const relVx = this.vx - other.vx;
+                            const relVy = this.vy - other.vy;
+                            const velAlongNormal = relVx * nx + relVy * ny;
+                            
+                            if (velAlongNormal < 0) {
+                                const j = -0.8 * velAlongNormal;
+                                this.vx += j * 0.3 * nx;
+                                this.vy += j * 0.3 * ny;
+                                other.vx -= j * 0.3 * nx;
+                                other.vy -= j * 0.3 * ny;
+                            }
+                        }
+                    }
+                    
+                    // ENFORCE CONSTRAINTS
+                    if (this.y > MIN_BOX_Y) {
+                        this.y = MIN_BOX_Y;
+                        this.vy = 0;
+                    }
+                    if (this.x - this.radius < BOX_LEFT) {
+                        this.x = BOX_LEFT + this.radius;
+                    }
+                    if (this.x + this.radius > BOX_RIGHT) {
+                        this.x = BOX_RIGHT - this.radius;
+                    }
+                }
+                
+                // FINAL ENFORCEMENT - ABSOLUTE CONSTRAINTS
+                if (this.y > MIN_BOX_Y) {
+                    this.y = MIN_BOX_Y;
+                    this.vy = 0;
+                    this.vx *= 0.9;
+                }
+                
+                if (this.x - this.radius < BOX_LEFT) {
+                    this.x = BOX_LEFT + this.radius;
+                    this.vx = 0;
+                }
+                if (this.x + this.radius > BOX_RIGHT) {
+                    this.x = BOX_RIGHT - this.radius;
+                    this.vx = 0;
+                }
+                
+                // === SETTLING ===
+                const speed = this.vx * this.vx + this.vy * this.vy;
+                if (speed < 0.2) {
+                    this.vx *= 0.8;
+                    this.vy *= 0.8;
+                    
+                    if (speed < 0.05) {
+                        this.vx = 0;
+                        this.vy = 0;
+                        this.settled = true;
+                    }
+                }
+                
+                // Add to tracking list
+                if (!heartBalls.includes(this)) {
+                    heartBalls.push(this);
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.strokeStyle = this.settled ? 'rgba(50,100,200,0.5)' : '#333';
+                ctx.lineWidth = this.settled ? 0.5 : 1;
+                ctx.stroke();
+            }
+        }
+
+        function drawBrainOutline() {
+            ctx.save();
+            
+            // Brain frame positioned to encompass attention basket and perception box
+            // Starts from around SIEVE_Y (450) and extends to bottom
+            const brainTop = 380;  // Start above the basket
+            const brainBottom = 690; // Extend below perception box
+            const brainCenterX = 300;
+            
+            // --- Outer cerebrum contour ----------------------------------------------------
+            ctx.fillStyle = 'rgba(255, 210, 220, 0.35)';
+            ctx.strokeStyle = 'rgba(235, 120, 150, 0.9)';
+            ctx.lineWidth = 5;
+            
+            const outerPath = new Path2D();
+            outerPath.moveTo(brainCenterX, brainTop);
+            outerPath.bezierCurveTo(220, brainTop - 10, 130, brainTop + 20, 80, brainTop + 70);
+            outerPath.bezierCurveTo(40, brainTop + 120, 25, brainTop + 180, 25, brainTop + 240);
+            outerPath.bezierCurveTo(25, brainBottom - 80, 60, brainBottom - 30, 135, brainBottom - 10);
+            outerPath.bezierCurveTo(200, brainBottom + 5, 260, brainBottom + 15, brainCenterX, brainBottom + 18);
+            outerPath.bezierCurveTo(340, brainBottom + 15, 400, brainBottom + 5, 465, brainBottom - 10);
+            outerPath.bezierCurveTo(540, brainBottom - 30, 575, brainBottom - 80, 575, brainTop + 240);
+            outerPath.bezierCurveTo(575, brainTop + 180, 560, brainTop + 120, 520, brainTop + 70);
+            outerPath.bezierCurveTo(470, brainTop + 20, 380, brainTop - 10, brainCenterX, brainTop);
+            outerPath.closePath();
+            
+            const innerPath = new Path2D();
+            const innerPadding = 60;
+            innerPath.moveTo(brainCenterX, brainTop + innerPadding);
+            innerPath.bezierCurveTo(240, brainTop + innerPadding - 5, 180, brainTop + innerPadding + 15, 145, brainTop + innerPadding + 50);
+            innerPath.bezierCurveTo(110, brainTop + innerPadding + 90, 100, brainTop + innerPadding + 140, 100, brainTop + innerPadding + 180);
+            innerPath.bezierCurveTo(100, brainBottom - 95, 130, brainBottom - 55, 190, brainBottom - 40);
+            innerPath.bezierCurveTo(240, brainBottom - 30, 275, brainBottom - 25, brainCenterX, brainBottom - 23);
+            innerPath.bezierCurveTo(325, brainBottom - 25, 360, brainBottom - 30, 410, brainBottom - 40);
+            innerPath.bezierCurveTo(470, brainBottom - 55, 500, brainBottom - 95, 500, brainTop + innerPadding + 180);
+            innerPath.bezierCurveTo(500, brainTop + innerPadding + 140, 490, brainTop + innerPadding + 90, 455, brainTop + innerPadding + 50);
+            innerPath.bezierCurveTo(420, brainTop + innerPadding + 15, 360, brainTop + innerPadding - 5, brainCenterX, brainTop + innerPadding);
+            innerPath.closePath();
+            
+            // Create a ring by filling outer minus inner using even-odd rule
+            const cerebrumRing = new Path2D();
+            cerebrumRing.addPath(outerPath);
+            cerebrumRing.addPath(innerPath);
+            ctx.fill(cerebrumRing, 'evenodd');
+            ctx.stroke(outerPath);
+            
+            // Soft highlight on inner edge
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+            ctx.lineWidth = 2;
+            ctx.stroke(innerPath);
+            
+            // --- Major anatomical landmarks -----------------------------------------------
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'rgba(210, 90, 125, 0.8)';
+            
+            // Central sulci (left)
+            ctx.beginPath();
+            ctx.moveTo(200, brainTop + 30);
+            ctx.bezierCurveTo(150, brainTop + 90, 115, brainTop + 160, 105, brainTop + 240);
+            ctx.bezierCurveTo(100, brainTop + 290, 105, brainBottom - 60, 115, brainBottom - 30);
+            ctx.stroke();
+            
+            // Central sulci (right)
+            ctx.beginPath();
+            ctx.moveTo(400, brainTop + 30);
+            ctx.bezierCurveTo(450, brainTop + 90, 485, brainTop + 160, 495, brainTop + 240);
+            ctx.bezierCurveTo(500, brainTop + 290, 495, brainBottom - 60, 485, brainBottom - 30);
+            ctx.stroke();
+            
+            // Lateral sulci (Sylvian fissures)
+            ctx.beginPath();
+            ctx.moveTo(55, brainTop + 200);
+            ctx.bezierCurveTo(110, brainTop + 235, 170, brainTop + 260, 230, brainTop + 275);
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.moveTo(545, brainTop + 200);
+            ctx.bezierCurveTo(490, brainTop + 235, 430, brainTop + 260, 370, brainTop + 275);
+            ctx.stroke();
+            
+            // Longitudinal fissure
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgba(255, 220, 235, 0.6)';
+            ctx.beginPath();
+            ctx.moveTo(brainCenterX, brainTop + 30);
+            ctx.bezierCurveTo(brainCenterX, brainTop + 120, brainCenterX, brainTop + 200, brainCenterX, brainTop + 280);
+            ctx.bezierCurveTo(brainCenterX, brainBottom - 100, brainCenterX, brainBottom - 40, brainCenterX, brainBottom);
+            ctx.stroke();
+            
+            // --- Secondary gyri texture ----------------------------------------------------
+            const textureStroke = (fromX, fromY, ctrlX, ctrlY, toX, toY, alpha=0.35) => {
+                ctx.strokeStyle = `rgba(240, 150, 170, ${alpha})`;
+                ctx.lineWidth = 1.8;
+                ctx.beginPath();
+                ctx.moveTo(fromX, fromY);
+                ctx.quadraticCurveTo(ctrlX, ctrlY, toX, toY);
+                ctx.stroke();
+            };
+            
+            const leftGyri = [
+                { from:[95, brainTop + 80], ctrl:[70, brainTop + 130], to:[60, brainTop + 190] },
+                { from:[75, brainTop + 160], ctrl:[60, brainTop + 220], to:[65, brainTop + 280] },
+                { from:[95, brainTop + 250], ctrl:[110, brainBottom - 90], to:[130, brainBottom - 40] },
+                { from:[110, brainBottom - 65], ctrl:[140, brainBottom - 30], to:[180, brainBottom - 15] }
+            ];
+            leftGyri.forEach(({from, ctrl, to}) => textureStroke(from[0], from[1], ctrl[0], ctrl[1], to[0], to[1]));
+            
+            const rightGyri = [
+                { from:[505, brainTop + 80], ctrl:[530, brainTop + 130], to:[540, brainTop + 190] },
+                { from:[525, brainTop + 160], ctrl:[540, brainTop + 220], to:[535, brainTop + 280] },
+                { from:[505, brainTop + 250], ctrl:[490, brainBottom - 90], to:[470, brainBottom - 40] },
+                { from:[490, brainBottom - 65], ctrl:[460, brainBottom - 30], to:[420, brainBottom - 15] }
+            ];
+            rightGyri.forEach(({from, ctrl, to}) => textureStroke(from[0], from[1], ctrl[0], ctrl[1], to[0], to[1]));
+            
+            // Edge shading
+            const gradient = ctx.createLinearGradient(0, brainTop, 0, brainBottom);
+            gradient.addColorStop(0, 'rgba(255, 180, 200, 0.12)');
+            gradient.addColorStop(0.5, 'rgba(255, 150, 180, 0.05)');
+            gradient.addColorStop(1, 'rgba(255, 180, 200, 0.12)');
+            ctx.fillStyle = gradient;
+            ctx.fill(cerebrumRing, 'evenodd');
+            
+            ctx.restore();
+        }
+
+        function drawInformationSource() {
+            ctx.save();
+            
+            // Draw WIDE cloud/source - bigger than funnel
+            ctx.fillStyle = 'rgba(100, 150, 255, 0.12)';
+            ctx.strokeStyle = 'rgba(100, 150, 255, 0.4)';
+            ctx.lineWidth = 2;
+            
+            // Large cloud shape spanning wider than funnel
+            ctx.beginPath();
+            ctx.arc(80, 60, 45, 0, Math.PI * 2);
+            ctx.arc(150, 45, 50, 0, Math.PI * 2);
+            ctx.arc(230, 35, 55, 0, Math.PI * 2);
+            ctx.arc(300, 30, 50, 0, Math.PI * 2);
+            ctx.arc(370, 35, 55, 0, Math.PI * 2);
+            ctx.arc(450, 45, 50, 0, Math.PI * 2);
+            ctx.arc(520, 60, 45, 0, Math.PI * 2);
+            ctx.arc(300, 70, 60, 0, Math.PI * 2);
+            ctx.arc(180, 75, 45, 0, Math.PI * 2);
+            ctx.arc(420, 75, 45, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            
+            // Floating symbols representing raw information - spread wider
+            ctx.fillStyle = '#666';
+            ctx.font = '14px Arial';
+            const symbols = ['◆', '●', '■', '▲', '★', '◇', '○', '□', '▼', '◈', '●', '■'];
+            const time = Date.now() / 1000;
+            symbols.forEach((s, i) => {
+                const x = 60 + (i % 6) * 85 + Math.sin(time + i) * 8;
+                const y = 40 + Math.floor(i / 6) * 35 + Math.cos(time + i * 0.7) * 6;
+                ctx.fillText(s, x, y);
+            });
+            
+            // Downward arrows showing information flow
+            ctx.fillStyle = 'rgba(100, 100, 100, 0.3)';
+            ctx.font = '16px Arial';
+            for (let i = 0; i < 7; i++) {
+                const x = 50 + i * 85;
+                const y = 100 + Math.sin(time * 2 + i) * 5;
+                ctx.fillText('↓', x, y);
+            }
+            
+            // Label
+            ctx.fillStyle = '#333';
+            ctx.font = 'bold 14px Segoe UI';
+            ctx.textAlign = 'center';
+            ctx.fillText('ENVIRONMENT', 300, 130);
+            ctx.fillStyle = '#666';
+            
+            ctx.restore();
+        }
+        
+        function drawFunnel() {
+            ctx.save();
+            
+            // Draw funnel - narrower than information source (100-500 vs 30-570)
+            ctx.beginPath();
+            ctx.moveTo(100, FUNNEL_TOP_Y);
+            ctx.lineTo(250, FUNNEL_BOTTOM_Y);
+            ctx.lineTo(350, FUNNEL_BOTTOM_Y);
+            ctx.lineTo(500, FUNNEL_TOP_Y);
+            ctx.closePath();
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 4;
+            ctx.stroke();
+            
+            // Fill funnel
+            ctx.fillStyle = 'rgba(180, 180, 180, 0.15)';
+            ctx.fill();
+            
+            // Draw channel walls from funnel (removed cone)
+            ctx.beginPath();
+            ctx.moveTo(250, FUNNEL_BOTTOM_Y);
+            ctx.lineTo(230, FUNNEL_BOTTOM_Y + 30);
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.moveTo(350, FUNNEL_BOTTOM_Y);
+            ctx.lineTo(370, FUNNEL_BOTTOM_Y + 30);
+            ctx.stroke();
+            
+            // Label
+            ctx.fillStyle = '#333';
+            ctx.font = 'bold 14px Segoe UI';
+            ctx.textAlign = 'center';
+            ctx.fillText('SENSORY RECEPTORS', 300, FUNNEL_TOP_Y + 40);
+            ctx.fillStyle = '#666';
+            ctx.restore();
+        }
+        
+        function drawSieve() {
+            ctx.save();
+            const sieveLeft = 200;
+            const sieveRight = 400;
+            const sieveWidth = sieveRight - sieveLeft;
+            
+            // Always draw basket shape (attention is always active)
+            ctx.strokeStyle = '#8B4513'; // Brown color for basket
+            ctx.lineWidth = 4;
+            
+            // Basket rim (top curve)
+            ctx.beginPath();
+            ctx.moveTo(sieveLeft - 10, SIEVE_Y - 20);
+            ctx.quadraticCurveTo(sieveLeft + sieveWidth/2, SIEVE_Y - 40, sieveRight + 10, SIEVE_Y - 20);
+            ctx.stroke();
+            
+            // Basket sides
+            ctx.beginPath();
+            ctx.moveTo(sieveLeft - 10, SIEVE_Y - 20);
+            ctx.lineTo(sieveLeft - 5, SIEVE_Y + 30);
+            ctx.moveTo(sieveRight + 10, SIEVE_Y - 20);
+            ctx.lineTo(sieveRight + 5, SIEVE_Y + 30);
+            ctx.stroke();
+            
+            // Basket bottom
+            ctx.beginPath();
+            ctx.moveTo(sieveLeft - 5, SIEVE_Y + 30);
+            ctx.lineTo(sieveRight + 5, SIEVE_Y + 30);
+            ctx.stroke();
+            
+            // Basket weave pattern
+            ctx.strokeStyle = '#654321';
+            ctx.lineWidth = 2;
+            
+            // Vertical weaves
+            for (let x = sieveLeft; x <= sieveRight; x += 15) {
+                ctx.beginPath();
+                ctx.moveTo(x, SIEVE_Y - 15);
+                ctx.lineTo(x, SIEVE_Y + 25);
+                ctx.stroke();
+            }
+            
+            // Horizontal weaves
+            for (let y = SIEVE_Y - 10; y <= SIEVE_Y + 20; y += 8) {
+                ctx.beginPath();
+                ctx.moveTo(sieveLeft, y);
+                ctx.lineTo(sieveRight, y);
+                ctx.stroke();
+            }
+            
+            // Label
+            ctx.fillStyle = '#2a7d2a';
+            ctx.font = 'bold 14px Segoe UI';
+            ctx.textAlign = 'center';
+            ctx.fillText('ATTENTION', 300, SIEVE_Y + 50);
+            ctx.fillStyle = '#666';
+            
+            ctx.restore();
+        }
+        
+        function drawBox() {
+            ctx.save();
+            
+            // Draw box
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(BOX_LEFT, BOX_TOP, BOX_RIGHT - BOX_LEFT, BOX_BOTTOM - BOX_TOP);
+            
+            // Box fill
+            ctx.fillStyle = 'rgba(180, 180, 180, 0.1)';
+            ctx.fillRect(BOX_LEFT, BOX_TOP, BOX_RIGHT - BOX_LEFT, BOX_BOTTOM - BOX_TOP);
+            
+            // Label
+            ctx.fillStyle = '#333';
+            ctx.font = 'bold 14px Segoe UI';
+            ctx.textAlign = 'center';
+            ctx.fillText('PERCEPTION', BOX_CENTER_X, BOX_TOP - 8);
+            ctx.fillStyle = '#666';
+            
+            // Show ball count
+            ctx.fillStyle = '#4285F4';
+            ctx.font = 'bold 12px Segoe UI';
+            ctx.textAlign = 'center';
+            
+            ctx.restore();
+        }
+
+        function loop() {
+            if (!simulationRunning) return;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw brain outline first (background)
+            drawBrainOutline();
+            
+            // Draw components in order
+            drawInformationSource();
+            drawFunnel();
+            drawSieve();
+            drawBox();
+
+            // Reset and populate grid for this frame
+            collisionGrid = {};
+            particles.forEach(p => {
+                if (p.y > BOX_TOP - 20 && p.type === 'relevant' && !p.fellOff && !p.inSieve) {
+                    addToGrid(p);
+                }
+            });
+
+            // Update and draw particles
+            particles.forEach(p => {
+                p.update();
+                p.handleBoxFill();
+                p.draw();
+            });
+
+            requestAnimationFrame(loop);
+        }
+
+        // --- Controls ---
+
+        function startSimulation() {
+            let count = 0;
+            const totalParticles = 300;
+            const batchSize = 3; // Single particles for staggered effect
+            
+            let interval = setInterval(() => {
+                for (let i = 0; i < batchSize && count < totalParticles; i++) {
+                    let type = Math.random() > 0.6 ? 'distractor' : 'relevant'; 
+                    const x = 50 + Math.random() * 500;
+                    particles.push(new Particle(x, 80 + Math.random() * 40, type));
+                    count++;
+                }
+                if(count >= totalParticles) {
+                    clearInterval(interval);
+                }
+            }, 100); // Much slower interval for staggered fall
+        }
+        
+        function resetSimulation() {
+            particles = [];
+            heartBalls = [];
+            filterActive = true;
+        }
+
+        // Start Loop
+        loop();
+
+    </script>
+</body>
+</html>
